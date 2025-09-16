@@ -285,7 +285,7 @@ class TaskScheduler:
         self._stop_event.clear()
 
         for i in range(self.max_workers):
-            await self._start_worker(f"worker-{i}")
+            await self._start_worker(f"{i}")
         
         self._monitor = asyncio.create_task(self._monitor_workers())
         self._distributor = asyncio.create_task(self._dispatch())
