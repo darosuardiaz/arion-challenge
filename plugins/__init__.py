@@ -3,7 +3,7 @@ import inspect
 import pkgutil
 from abc import ABC, ABCMeta, abstractmethod
 from pathlib import Path
-from typing import Dict, Type
+from typing import Dict, Type, List
 
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -147,6 +147,11 @@ def unregister_worker_instance(name: str) -> bool:
     return WorkerPluginMeta.instances.pop(name, None) is not None
 
 
+def get_all_plugins() -> List[Type["BaseWorker"]]:
+    """Return all registered plugin classes."""
+    return list(WorkerPluginMeta.registry.values())
+
+
 class BaseWorker(ABC, metaclass=WorkerPluginMeta):
     """ Abstract base class for workers """
     name: str | None = None
@@ -166,5 +171,6 @@ __all__ = [
     "get_worker",
     "get_worker_instance",
     "unregister_worker_instance",
+    "get_all_plugins",
     "WorkerPluginMeta",
 ]
