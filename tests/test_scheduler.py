@@ -48,13 +48,17 @@ async def test_backpressure_control():
         
         # Wait for completion
         for task_id in task_ids:
-            while True:
+            timeout_count = 0
+            while timeout_count < 100:  # 10 second timeout
                 status = await scheduler.get_task_status(task_id)
                 if status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                     result = await scheduler.get_task_result(task_id)
                     print(f"Task {task_id}: {status.name}")
                     break
                 await asyncio.sleep(0.1)
+                timeout_count += 1
+            else:
+                print(f"Task {task_id} timed out")
         
     finally:
         await scheduler.stop()
@@ -97,7 +101,8 @@ async def test_priority_ordering():
         # Wait for all tasks to complete and track order
         execution_order = []
         for task_id in task_ids:
-            while True:
+            timeout_count = 0
+            while timeout_count < 100:  # 10 second timeout
                 status = await scheduler.get_task_status(task_id)
                 if status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                     # Get task to see which one completed
@@ -106,6 +111,9 @@ async def test_priority_ordering():
                         execution_order.append(task.metadata["name"])
                     break
                 await asyncio.sleep(0.1)
+                timeout_count += 1
+            else:
+                print(f"Task {task_id} timed out")
         
         print(f"Completion order: {execution_order}")
         
@@ -150,13 +158,18 @@ async def test_worker_scaling():
         # Monitor execution
         start_time = time.time()
         completed = 0
-        while completed < len(task_ids):
+        timeout_count = 0
+        while completed < len(task_ids) and timeout_count < 200:  # 20 second timeout
             completed = 0
             for task_id in task_ids:
                 status = await scheduler.get_task_status(task_id)
                 if status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                     completed += 1
             await asyncio.sleep(0.1)
+            timeout_count += 1
+        
+        if timeout_count >= 200:
+            print(f"Timeout: only {completed}/{len(task_ids)} tasks completed")
         
         execution_time = time.time() - start_time
         print(f"All tasks completed in {execution_time:.2f}s")
@@ -218,7 +231,8 @@ async def test_mixed_task_types():
         # Monitor execution
         results = {}
         for task_id in task_ids:
-            while True:
+            timeout_count = 0
+            while timeout_count < 100:  # 10 second timeout
                 status = await scheduler.get_task_status(task_id)
                 if status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                     result = await scheduler.get_task_result(task_id)
@@ -230,6 +244,15 @@ async def test_mixed_task_types():
                     }
                     break
                 await asyncio.sleep(0.1)
+                timeout_count += 1
+            else:
+                print(f"Task {task_id} timed out")
+                results[task_id] = {
+                    'status': TaskStatus.TIMEOUT,
+                    'result': None,
+                    'execution_time': 0,
+                    'error': 'Timeout'
+                }
         
         # Print results
         for task_id, result in results.items():

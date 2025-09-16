@@ -33,7 +33,7 @@ async def test_pipeline_direct(count: int = 100, window_secs: int = 2) -> None:
     try:
         # Test pipeline creation and context management
         pipeline = Pipeline(
-            queue_maxsize=50,
+            queue_maxsize=200,  # Reasonable size for normal operations
             window_secs=window_secs,
             db_path=db_path,
             logger=logging.getLogger("test.pipeline")
@@ -49,6 +49,10 @@ async def test_pipeline_direct(count: int = 100, window_secs: int = 2) -> None:
             logging.info(f"📦 Database tables: {table_names}")
             assert 'aggregates' in table_names, "Aggregates table should exist"
             
+            # Start pipeline workers FIRST to avoid queue deadlock
+            logging.info("🚀 Starting pipeline workers...")
+            tasks = await pipeline.start_workers()
+            
             # Test queue operations
             test_events = []
             async for event in generate_test_data(count=count, include_ts=True):
@@ -56,10 +60,6 @@ async def test_pipeline_direct(count: int = 100, window_secs: int = 2) -> None:
                 await pipeline.ingest_q.put(event)
             
             logging.info(f"📤 Sent {len(test_events)} events to pipeline")
-            
-            # Start pipeline workers
-            logging.info("🚀 Starting pipeline workers...")
-            tasks = await pipeline.start_workers()
             
             # Let pipeline process events
             await asyncio.sleep(window_secs + 1)
@@ -197,7 +197,7 @@ async def benchmark_pipeline(count: int = 1000, concurrency: int = 10) -> None:
         start_time = time.time()
         
         with pipeline:
-            # Start workers
+            # Start workers FIRST to avoid queue deadlock
             tasks = await pipeline.start_workers()
             
             # Send events with controlled concurrency
