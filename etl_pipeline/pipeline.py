@@ -1,54 +1,86 @@
 import asyncio, os, time, sqlite3, logging, uuid, contextlib, json
-from typing import AsyncIterator, Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional, Callable
 from collections import defaultdict
+import sys
+import os.path
 
 
-logger = logging.getLogger("pipeline.windowed")
+_parent_dir = os.path.dirname(os.path.dirname(__file__))
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+from resource_manager import ResourceManager
+
+
+logger = logging.getLogger("etl_pipeline")
 
 
 class Pipeline:
     def __init__(
-        self,
-        queue_maxsize: int = None,
-        window_secs: int = None,
-        db_path: str = None
-    ):
+            self,
+            queue_maxsize: int = None,
+            window_secs: int = None,
+            db_path: str = None,
+            logger: Optional[logging.Logger] = None
+        ):
         self.queue_maxsize = queue_maxsize or int(os.getenv("QUEUE_MAXSIZE", "1000"))
         self.window_secs = window_secs or int(os.getenv("WINDOW_SECS", "10"))
         self.db_path = db_path or os.getenv("DB_PATH", "aggregates.db")
-        
-        # Initialize queues
-        self.ingest_q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        self.db_q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        self.outbound_q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        self.db_failures_q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        self.dead_letter_q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        
-        # Track running tasks
         self._tasks: list[asyncio.Task] = []
+        self.resource_manager = ResourceManager.for_pipeline(
+            db_path=self.db_path,
+            queue_maxsize=self.queue_maxsize,
+            setup_schema=True,
+            logger=logger or logging.getLogger("pipeline.resources")
+        )
 
-    def _db_init(self):
-        """Initialize the database schema."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS aggregates(
-                    window_start   INTEGER NOT NULL,
-                    category       TEXT    NOT NULL,
-                    total_value    REAL    NOT NULL,
-                    total_quantity INTEGER NOT NULL,
-                    record_count   INTEGER NOT NULL,
-                    avg_value      REAL    NOT NULL,
-                    PRIMARY KEY(window_start, category)
-                );
-            """)
-            conn.commit()
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
+
+    def __enter__(self):
+        """Enter context and activate ResourceManager."""
+        self.resource_manager.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context and cleanup ResourceManager."""
+        return self.resource_manager.__exit__(exc_type, exc_val, exc_tb)
+
+    @property
+    def ingest_q(self) -> asyncio.Queue:
+        """Get ingest queue from ResourceManager."""
+        return self.resource_manager.get_message_queue()["ingest"]
+    
+    @property
+    def db_q(self) -> asyncio.Queue:
+        """Get database queue from ResourceManager."""
+        return self.resource_manager.get_message_queue()["db"]
+    
+    @property
+    def outbound_q(self) -> asyncio.Queue:
+        """Get outbound queue from ResourceManager."""
+        return self.resource_manager.get_message_queue()["outbound"]
+    
+    @property
+    def db_failures_q(self) -> asyncio.Queue:
+        """Get database failures queue from ResourceManager."""
+        return self.resource_manager.get_message_queue()["db_failures"]
+    
+    @property
+    def dead_letter_q(self) -> asyncio.Queue:
+        """Get dead letter queue from ResourceManager."""
+        return self.resource_manager.get_message_queue()["dead_letter"]
+
+    @property
+    def database(self) -> sqlite3.Connection:
+        """Get database connection from ResourceManager."""
+        return self.resource_manager.get_database()
 
     async def db_writer(self, batch_size: int = 256, batch_wait: float = 0.050):
         """Batches aggregate rows and writes them in a single transaction off the event loop."""
-        conn: sqlite3.Connection = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        # Get database connection from ResourceManager
+        conn: sqlite3.Connection = self.resource_manager.get_database()
         sql = """
         INSERT INTO aggregates(window_start, category, total_value, total_quantity, record_count, avg_value)
         VALUES (:window_start, :category, :total_value, :total_quantity, :record_count, :avg_value)
@@ -83,19 +115,25 @@ class Pipeline:
         except asyncio.CancelledError:
             # drain rows
             pending = []
-            while True:
-                try:
-                    pending.append(self.db_q.get_nowait())
-                except asyncio.QueueEmpty:
-                    break
-            if pending:
-                def _write_rest():
-                    with conn:
-                        conn.executemany(sql, pending)
-                await asyncio.to_thread(_write_rest)
+            try:
+                if self.resource_manager._active:
+                    while True:
+                        try:
+                            pending.append(self.db_q.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                    if pending:
+                        def _write_rest():
+                            with conn:
+                                conn.executemany(sql, pending)
+                        await asyncio.to_thread(_write_rest)
+            except RuntimeError:
+                # ResourceManager is no longer active, skip cleanup
+                pass
             raise
         finally:
-            conn.close()
+            # ResourceManager will handle connection cleanup
+            pass
 
     async def outbound_worker(self):
         """Dummy publisher so outbound_q doesn't back up."""
@@ -109,7 +147,10 @@ class Pipeline:
         except asyncio.CancelledError:
             raise
 
+    # ------------------------------------------------------------------
     # Helpers
+    # ------------------------------------------------------------------
+
     async def _send_to_mq(self, queue_name: str, message: Dict[str, Any]) -> None:
         """Enqueue to in-process outbound queue; a worker will 'publish'."""
         payload = {
@@ -146,7 +187,10 @@ class Pipeline:
         it = int(t)
         return it - (it % self.window_secs)
 
+    # ------------------------------------------------------------------
     # Stages 
+    # ------------------------------------------------------------------
+
     async def fetch(self, queue: asyncio.Queue) -> AsyncIterator[Dict[str, Any]]:
         while True:
             item = await queue.get()
@@ -255,7 +299,10 @@ class Pipeline:
                 self._send_to_mq("aggregates", agg),
             )
 
+    # ------------------------------------------------------------------
     # Execution
+    # ------------------------------------------------------------------
+
     async def run_pipeline(self):
         stream = self.fetch(self.ingest_q)
         stream = self.transform(stream)
@@ -264,8 +311,6 @@ class Pipeline:
 
     async def start_workers(self) -> list[asyncio.Task]:
         """Start all background workers and return their tasks."""
-        await asyncio.to_thread(self._db_init)
-        
         tasks = [
             asyncio.create_task(self.run_pipeline()),
             asyncio.create_task(self.db_writer()),
@@ -295,6 +340,10 @@ class Pipeline:
 
         self._tasks.clear()
 
+    # ------------------------------------------------------------------
+    # Monitoring
+    # ------------------------------------------------------------------
+
     def get_queue_info(self) -> Dict[str, int]:
         """Get current queue sizes for health monitoring."""
         return {
@@ -304,3 +353,15 @@ class Pipeline:
             "db_failures_q": self.db_failures_q.qsize(),
             "dead_letter_q": self.dead_letter_q.qsize(),
         }
+
+    def get_resource_metrics(self) -> Dict[str, Any]:
+        """Get resource management metrics."""
+        return self.resource_manager.metrics_snapshot()
+
+    def release_database(self) -> bool:
+        """Early release of database connection."""
+        return self.resource_manager.release_database()
+
+    def release_message_queue(self) -> bool:
+        """Early release of message queue."""
+        return self.resource_manager.release_message_queue()
