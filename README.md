@@ -1,4 +1,4 @@
-## 🎯 Overview
+## Overview
 
 1. **Memory-Efficient Data Pipeline** - Real-time JSON data processing with constant memory usage
 2. **Custom Context Manager** - Robust resource management with automatic cleanup
@@ -25,7 +25,7 @@
 ✅ **Comprehensive Testing** - Unit, integration, performance, and API tests  
 ✅ **Production Ready** - Logging, metrics, health checks, and monitoring  
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -183,11 +183,11 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/metrics
 ```
 
-## 🧪 Testing
+## Testing
 
 The project includes comprehensive test suites covering unit tests, integration tests, performance tests, and API tests. See the [Running Tests](#running-tests) section above for basic usage, or check [TESTING.md](TESTING.md) for comprehensive testing documentation.
 
-## 📚 Core Components Guide
+## Core Components Guide
 
 ### 1. ETL Pipeline
 
